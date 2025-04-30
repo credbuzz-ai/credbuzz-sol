@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 
-declare_id!("3HdMBj43iTBkBhCbM4DuZeTqjnfvieeKvDLjhXPngaoQ");
+declare_id!("4JLH5Aa3gVDEDDz4teZuWbGzF3wZfoJE38zwjmUGuZ8J");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -40,11 +40,13 @@ impl Space for Campaign {
 #[account]
 pub struct MarketplaceState {
     pub owner: Pubkey,
+    pub campaign_counter: u8,
 }
 
 impl Space for MarketplaceState {
     const INIT_SPACE: usize = 8 + // Discriminator
-        32; // owner
+        32 + // owner
+        1; // campaign_counter
 }
 
 #[program]
@@ -74,12 +76,12 @@ pub mod sol_cb {
 
     pub fn initialize(ctx: Context<InitializeMarketplace>) -> Result<()> {
         ctx.accounts.marketplace_state.owner = ctx.accounts.owner.key();
+        ctx.accounts.marketplace_state.campaign_counter = 0;
         Ok(())
     }
 
     pub fn create_new_campaign(
         ctx: Context<CreateNewCampaign>,
-        campaign_id: u8,
         selected_kol: Pubkey,
         offering_amount: u64,
         promotion_ends_in: i64,
@@ -93,6 +95,15 @@ pub mod sol_cb {
         if offer_ends_in <= current_time || promotion_ends_in <= current_time {
             return err!(CustomErrorCode::InvalidTimeParameters);
         }
+
+        // Generate a campaign ID by incrementing the counter
+        let campaign_id = ctx.accounts.marketplace_state.campaign_counter;
+        ctx.accounts.marketplace_state.campaign_counter = ctx
+            .accounts
+            .marketplace_state
+            .campaign_counter
+            .checked_add(1)
+            .unwrap();
 
         let campaign = &mut ctx.accounts.campaign;
         campaign.id = campaign_id;
@@ -114,7 +125,6 @@ pub mod sol_cb {
 
     pub fn update_campaign(
         ctx: Context<UpdateCampaign>,
-        campaign_id: u8,
         selected_kol: Pubkey,
         promotion_ends_in: i64,
         offer_ends_in: i64,
@@ -140,17 +150,14 @@ pub mod sol_cb {
         campaign.amount_offered = new_amount_offered;
 
         emit!(CampaignUpdated {
-            campaign_id: campaign_id.clone(),
+            campaign_id: campaign.id,
             updated_by: ctx.accounts.creator.key(),
         });
 
         Ok(())
     }
 
-    pub fn accept_project_campaign(
-        ctx: Context<AcceptProjectCampaign>,
-        campaign_id: u8,
-    ) -> Result<()> {
+    pub fn accept_project_campaign(ctx: Context<AcceptProjectCampaign>) -> Result<()> {
         let campaign = &mut ctx.accounts.campaign;
         let current_time = Clock::get()?.unix_timestamp;
 
@@ -169,17 +176,14 @@ pub mod sol_cb {
         campaign.campaign_status = CampaignStatus::Accepted;
 
         emit!(CampaignAccepted {
-            campaign_id,
+            campaign_id: campaign.id,
             accepted_by: ctx.accounts.kol.key(),
         });
 
         Ok(())
     }
 
-    pub fn fulfil_project_campaign(
-        ctx: Context<FulfilProjectCampaign>,
-        campaign_id: u8,
-    ) -> Result<()> {
+    pub fn fulfil_project_campaign(ctx: Context<FulfilProjectCampaign>) -> Result<()> {
         let campaign = &mut ctx.accounts.campaign;
 
         if campaign.campaign_status != CampaignStatus::Accepted {
@@ -189,7 +193,7 @@ pub mod sol_cb {
         campaign.campaign_status = CampaignStatus::Fulfilled;
 
         emit!(CampaignFulfilled {
-            campaign_id: campaign_id
+            campaign_id: campaign.id
         });
 
         Ok(())
@@ -212,7 +216,6 @@ pub struct InitializeMarketplace<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(campaign_id: u8)]
 pub struct CreateNewCampaign<'info> {
     #[account(
         mut,
@@ -226,7 +229,7 @@ pub struct CreateNewCampaign<'info> {
         init,
         payer = creator,
         space = Campaign::INIT_SPACE,
-        seeds = [b"campaign", campaign_id.to_string().as_bytes(), creator.key().as_ref()],
+        seeds = [b"campaign", creator.key().as_ref()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
@@ -234,7 +237,6 @@ pub struct CreateNewCampaign<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(campaign_id: u8)]
 pub struct UpdateCampaign<'info> {
     #[account(
         mut,
@@ -246,7 +248,7 @@ pub struct UpdateCampaign<'info> {
     pub creator: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign_id.to_string().as_bytes()],
+        seeds = [b"campaign", creator.key().as_ref()],
         bump,
         constraint = campaign.creator_address == creator.key() @ CustomErrorCode::Unauthorized
     )]
@@ -254,7 +256,6 @@ pub struct UpdateCampaign<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(campaign_id: u8)]
 pub struct AcceptProjectCampaign<'info> {
     #[account(
         mut,
@@ -266,14 +267,13 @@ pub struct AcceptProjectCampaign<'info> {
     pub kol: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign_id.to_string().as_bytes()],
+        seeds = [b"campaign", campaign.creator_address.as_ref()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
 }
 
 #[derive(Accounts)]
-#[instruction(campaign_id: u8)]
 pub struct FulfilProjectCampaign<'info> {
     #[account(
         mut,
@@ -285,7 +285,7 @@ pub struct FulfilProjectCampaign<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign_id.to_string().as_bytes()],
+        seeds = [b"campaign", campaign.creator_address.as_ref()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,

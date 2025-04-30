@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-sol_cb = "3HdMBj43iTBkBhCbM4DuZeTqjnfvieeKvDLjhXPngaoQ"
+sol_cb = "4JLH5Aa3gVDEDDz4teZuWbGzF3wZfoJE38zwjmUGuZ8J"
 
 [registry]
 url = "https://api.apr.dev"
