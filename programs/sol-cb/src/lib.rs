@@ -14,7 +14,7 @@ pub enum CampaignStatus {
 
 #[account]
 pub struct Campaign {
-    pub id: u8,
+    pub id: [u8; 4],
     pub created_at: i64,
     pub creator_address: Pubkey,
     pub selected_kol: Pubkey,
@@ -26,7 +26,7 @@ pub struct Campaign {
 
 impl Space for Campaign {
     const INIT_SPACE: usize = 8 + // Discriminator
-        1 + // id
+        4 + // id
         8 + // created_at
         32 + // creator_address
         32 + // selected_kol
@@ -40,13 +40,13 @@ impl Space for Campaign {
 #[account]
 pub struct MarketplaceState {
     pub owner: Pubkey,
-    pub campaign_counter: u8,
+    pub campaign_counter: u32,
 }
 
 impl Space for MarketplaceState {
     const INIT_SPACE: usize = 8 + // Discriminator
         32 + // owner
-        1; // campaign_counter
+        4; // campaign_counter
 }
 
 #[program]
@@ -96,8 +96,21 @@ pub mod sol_cb {
             return err!(CustomErrorCode::InvalidTimeParameters);
         }
 
-        // Generate a campaign ID by incrementing the counter
-        let campaign_id = ctx.accounts.marketplace_state.campaign_counter;
+        // Generate a campaign ID by creating a hash of creator key and timestamp
+        let creator_key = ctx.accounts.creator.key();
+        let counter = ctx.accounts.marketplace_state.campaign_counter;
+
+        // Create input data to hash - combine creator key, counter, and timestamp for uniqueness
+        let mut data_to_hash = vec![];
+        data_to_hash.extend_from_slice(&current_time.to_le_bytes());
+        data_to_hash.extend_from_slice(creator_key.as_ref());
+        data_to_hash.extend_from_slice(&counter.to_le_bytes());
+
+        // Hash the data and take first 4 bytes
+        let hashed = hash(&data_to_hash).to_bytes();
+        let id_data = [hashed[0], hashed[1], hashed[2], hashed[3]];
+
+        // Increment the counter
         ctx.accounts.marketplace_state.campaign_counter = ctx
             .accounts
             .marketplace_state
@@ -106,7 +119,7 @@ pub mod sol_cb {
             .unwrap();
 
         let campaign = &mut ctx.accounts.campaign;
-        campaign.id = campaign_id;
+        campaign.id = id_data;
         campaign.created_at = current_time;
         campaign.creator_address = ctx.accounts.creator.key();
         campaign.selected_kol = selected_kol;
@@ -116,7 +129,7 @@ pub mod sol_cb {
         campaign.campaign_status = CampaignStatus::Open;
 
         emit!(CampaignCreated {
-            campaign_id,
+            campaign_id: id_data,
             user: ctx.accounts.creator.key(),
         });
 
@@ -294,23 +307,23 @@ pub struct FulfilProjectCampaign<'info> {
 // Events
 #[event]
 pub struct CampaignCreated {
-    pub campaign_id: u8,
+    pub campaign_id: [u8; 4],
     pub user: Pubkey,
 }
 
 #[event]
 pub struct CampaignUpdated {
-    pub campaign_id: u8,
+    pub campaign_id: [u8; 4],
     pub updated_by: Pubkey,
 }
 
 #[event]
 pub struct CampaignAccepted {
-    pub campaign_id: u8,
+    pub campaign_id: [u8; 4],
     pub accepted_by: Pubkey,
 }
 
 #[event]
 pub struct CampaignFulfilled {
-    pub campaign_id: u8,
+    pub campaign_id: [u8; 4],
 }
