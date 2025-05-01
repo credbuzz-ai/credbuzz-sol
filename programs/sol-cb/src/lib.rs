@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 
-declare_id!("4JLH5Aa3gVDEDDz4teZuWbGzF3wZfoJE38zwjmUGuZ8J");
+declare_id!("29ytFLSyqAzKRAw1Rf2bA6C6ExF1f3M5mcC8FhSxipZt");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
