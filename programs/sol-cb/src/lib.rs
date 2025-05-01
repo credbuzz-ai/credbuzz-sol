@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 
-declare_id!("29ytFLSyqAzKRAw1Rf2bA6C6ExF1f3M5mcC8FhSxipZt");
+declare_id!("AKgkjATtbWE7TxohY3nDed9gwQKRBV7MSpXCvrLxizek");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -242,7 +242,7 @@ pub struct CreateNewCampaign<'info> {
         init,
         payer = creator,
         space = Campaign::INIT_SPACE,
-        seeds = [b"campaign", creator.key().as_ref()],
+        seeds = [b"campaign", creator.key().as_ref(), &marketplace_state.campaign_counter.to_le_bytes()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
@@ -261,7 +261,7 @@ pub struct UpdateCampaign<'info> {
     pub creator: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", creator.key().as_ref()],
+        seeds = [b"campaign", creator.key().as_ref(), &campaign.id],
         bump,
         constraint = campaign.creator_address == creator.key() @ CustomErrorCode::Unauthorized
     )]
@@ -280,7 +280,7 @@ pub struct AcceptProjectCampaign<'info> {
     pub kol: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign.creator_address.as_ref()],
+        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.id],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
@@ -298,7 +298,7 @@ pub struct FulfilProjectCampaign<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign.creator_address.as_ref()],
+        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.id],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
