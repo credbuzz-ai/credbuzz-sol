@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 
-declare_id!("AKgkjATtbWE7TxohY3nDed9gwQKRBV7MSpXCvrLxizek");
+declare_id!("DhmJw64wiY46tmx5tetA41wwuoEGFUHhnsMduCVxAkcv");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -15,6 +15,7 @@ pub enum CampaignStatus {
 #[account]
 pub struct Campaign {
     pub id: [u8; 4],
+    pub counter: u32,
     pub created_at: i64,
     pub creator_address: Pubkey,
     pub selected_kol: Pubkey,
@@ -27,6 +28,7 @@ pub struct Campaign {
 impl Space for Campaign {
     const INIT_SPACE: usize = 8 + // Discriminator
         4 + // id
+        4 + // counter
         8 + // created_at
         32 + // creator_address
         32 + // selected_kol
@@ -120,6 +122,7 @@ pub mod sol_cb {
 
         let campaign = &mut ctx.accounts.campaign;
         campaign.id = id_data;
+        campaign.counter = counter;
         campaign.created_at = current_time;
         campaign.creator_address = ctx.accounts.creator.key();
         campaign.selected_kol = selected_kol;
@@ -128,10 +131,12 @@ pub mod sol_cb {
         campaign.amount_offered = offering_amount;
         campaign.campaign_status = CampaignStatus::Open;
 
-        emit!(CampaignCreated {
-            campaign_id: id_data,
-            user: ctx.accounts.creator.key(),
-        });
+        msg!(
+            "Campaign created with ID: {:?}, creator: {:?} and counter: {:?}",
+            id_data,
+            ctx.accounts.creator.key(),
+            counter
+        );
 
         Ok(())
     }
@@ -162,10 +167,11 @@ pub mod sol_cb {
         campaign.offer_ends_in = offer_ends_in;
         campaign.amount_offered = new_amount_offered;
 
-        emit!(CampaignUpdated {
-            campaign_id: campaign.id,
-            updated_by: ctx.accounts.creator.key(),
-        });
+        msg!(
+            "Campaign updated with ID: {:?}, updated by: {:?}",
+            campaign.id,
+            ctx.accounts.creator.key()
+        );
 
         Ok(())
     }
@@ -188,10 +194,11 @@ pub mod sol_cb {
 
         campaign.campaign_status = CampaignStatus::Accepted;
 
-        emit!(CampaignAccepted {
-            campaign_id: campaign.id,
-            accepted_by: ctx.accounts.kol.key(),
-        });
+        msg!(
+            "Campaign accepted with ID: {:?}, accepted by: {:?}",
+            campaign.id,
+            ctx.accounts.kol.key()
+        );
 
         Ok(())
     }
@@ -205,9 +212,7 @@ pub mod sol_cb {
 
         campaign.campaign_status = CampaignStatus::Fulfilled;
 
-        emit!(CampaignFulfilled {
-            campaign_id: campaign.id
-        });
+        msg!("Campaign fulfilled with ID: {:?}", campaign.id);
 
         Ok(())
     }
@@ -261,7 +266,7 @@ pub struct UpdateCampaign<'info> {
     pub creator: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", creator.key().as_ref(), &campaign.id],
+        seeds = [b"campaign", creator.key().as_ref(), &campaign.counter.to_le_bytes()],
         bump,
         constraint = campaign.creator_address == creator.key() @ CustomErrorCode::Unauthorized
     )]
@@ -280,7 +285,7 @@ pub struct AcceptProjectCampaign<'info> {
     pub kol: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.id],
+        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.counter.to_le_bytes()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
@@ -298,17 +303,10 @@ pub struct FulfilProjectCampaign<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.id],
+        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.counter.to_le_bytes()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
-}
-
-// Events
-#[event]
-pub struct CampaignCreated {
-    pub campaign_id: [u8; 4],
-    pub user: Pubkey,
 }
 
 #[event]

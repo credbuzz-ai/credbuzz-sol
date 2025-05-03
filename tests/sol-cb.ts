@@ -17,9 +17,9 @@ describe("sol-cb", () => {
 
   let marketplacePda: PublicKey;
   let firstCampaignPda: PublicKey;
-  let firstCampaignId: number[];
+  let firstCampaignCounter: number;
   let secondCampaignPda: PublicKey;
-  let secondCampaignId: number[];
+  let secondCampaignCounter: number;
   let campaignCounter = 0;
 
   // Helper function to convert bytes to hex string
@@ -44,6 +44,7 @@ describe("sol-cb", () => {
     const campaign = await program.account.campaign.fetch(pda);
     console.log(`\n--- ${label} ---`);
     console.log(`Campaign ID: ${bytesToHex(campaign.id)}`);
+    console.log(`Campaign Counter: ${campaign.counter}`);
     console.log(`Campaign PDA: ${pda.toString()}`);
     console.log(`Creator: ${campaign.creatorAddress.toString()}`);
     console.log(`Selected KOL: ${campaign.selectedKol.toString()}`);
@@ -117,6 +118,7 @@ describe("sol-cb", () => {
     const promotionEndsIn = now + 86400 * 7;
     const offeringAmount = new BN(1000000);
 
+    console.log("campaignCounter", campaignCounter);
     // Use the campaign counter for PDA
     [firstCampaignPda] = PublicKey.findProgramAddressSync(
       [
@@ -150,10 +152,11 @@ describe("sol-cb", () => {
 
     // Verify campaign was created and log details
     const campaign = await logCampaignInfo(firstCampaignPda, "First Campaign");
-    firstCampaignId = campaign.id;
+    firstCampaignCounter = campaign.counter;
 
     // We can't predict the exact ID now, but we can check it's not all zeros
     expect(campaign.id).to.not.deep.equal([0, 0, 0, 0]);
+    expect(campaign.counter).to.equal(campaignCounter);
 
     // Increment local counter to match program
     campaignCounter++;
@@ -202,7 +205,7 @@ describe("sol-cb", () => {
       secondCampaignPda,
       "Second Campaign (Same User)"
     );
-    secondCampaignId = campaign.id;
+    secondCampaignCounter = campaign.counter;
 
     // Increment local counter to match program
     campaignCounter++;
@@ -210,8 +213,8 @@ describe("sol-cb", () => {
     // Log both campaigns to demonstrate multiple campaigns per user
     console.log("\n--- Multiple Campaigns Verification ---");
     console.log(`Same creator: ${firstCampaignPda} and ${secondCampaignPda}`);
-    console.log(`First campaign ID: ${bytesToHex(firstCampaignId)}`);
-    console.log(`Second campaign ID: ${bytesToHex(secondCampaignId)}`);
+    console.log(`First campaign counter: ${firstCampaignCounter}`);
+    console.log(`Second campaign counter: ${secondCampaignCounter}`);
   });
 
   it("Update First Campaign", async () => {
@@ -221,59 +224,43 @@ describe("sol-cb", () => {
     const newPromotionEndsIn = now + 86400 * 10; // 10 days from now
     const newOfferingAmount = new BN(1500000); // 1.5 USDC
 
-    // IMPORTANT: When we initialized in the contract, we *did not* use campaign IDs
-    // for seeds. So we need to continue using the original PDA without campaign IDs
-    // The contract likely expects a different PDA format for updates
+    // Now we'll use the counter-based PDA addressing
     console.log(
       "Using campaign address for update:",
       firstCampaignPda.toString()
     );
 
-    // Let's see what other PDAs might be valid
-    console.log("\nTrying different seed combinations:");
+    // Update the first campaign
+    await program.methods
+      .updateCampaign(
+        kol.publicKey,
+        new BN(newPromotionEndsIn),
+        new BN(newOfferEndsIn),
+        newOfferingAmount
+      )
+      .accountsStrict({
+        marketplaceState: marketplacePda,
+        creator: creator.publicKey,
+        campaign: firstCampaignPda,
+      })
+      .signers([creator])
+      .rpc();
 
-    const pda1 = PublicKey.findProgramAddressSync(
-      [Buffer.from("campaign"), creator.publicKey.toBuffer()],
-      program.programId
-    )[0];
-    console.log("PDA with just creator:", pda1.toString());
+    // Verify the campaign was updated
+    const updatedCampaign = await logCampaignInfo(
+      firstCampaignPda,
+      "Updated First Campaign"
+    );
 
-    try {
-      // Retrieve campaign from this address to see if it exists
-      await program.account.campaign.fetch(pda1);
-      console.log("Campaign exists at this address!");
-    } catch (e) {
-      console.log("No campaign at this address");
-    }
-
-    // Update the first campaign using the original address
-    try {
-      await program.methods
-        .updateCampaign(
-          kol.publicKey,
-          new BN(newPromotionEndsIn),
-          new BN(newOfferEndsIn),
-          newOfferingAmount
-        )
-        .accountsStrict({
-          marketplaceState: marketplacePda,
-          creator: creator.publicKey,
-          campaign: pda1, // Try with just creator in seeds
-        })
-        .signers([creator])
-        .rpc();
-
-      // If it succeeds, log the campaign details
-      const campaign = await logCampaignInfo(pda1, "Updated First Campaign");
-      console.log("Update succeeded with PDA:", pda1.toString());
-    } catch (e) {
-      console.log("Update failed with error:", e.message);
-    }
+    // Check that the amount was updated
+    expect(updatedCampaign.amountOffered.toString()).to.equal(
+      newOfferingAmount.toString()
+    );
+    // Check that counter remains the same
+    expect(updatedCampaign.counter).to.equal(firstCampaignCounter);
   });
 
   it("Create Three Campaigns for Same Creator", async () => {
-    // Initialize marketplace if needed already taken care of now
-
     // Create a new keypair for this test to start fresh
     const multiCreator = Keypair.generate();
     const kol1 = Keypair.generate();
@@ -314,7 +301,7 @@ describe("sol-cb", () => {
     // Use the global campaign counter from marketplace
     let creatorCampaignCounter = marketplaceState.campaignCounter;
     const campaignPdas: PublicKey[] = [];
-    const campaignIds: number[][] = [];
+    const campaignCounters: number[] = [];
 
     // Current timestamp
     const now = Math.floor(Date.now() / 1000);
@@ -350,7 +337,7 @@ describe("sol-cb", () => {
     for (let i = 0; i < 3; i++) {
       const params = campaignParams[i];
 
-      // Calculate PDA - NO CAMPAIGN NUMBER NEEDED
+      // Calculate PDA
       const [campaignPda] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("campaign"),
@@ -385,7 +372,7 @@ describe("sol-cb", () => {
 
       // Log and store campaign info
       const campaign = await logCampaignInfo(campaignPda, params.label);
-      campaignIds.push(campaign.id);
+      campaignCounters.push(campaign.counter);
 
       // Update marketplace state after each campaign to get the latest counter
       marketplaceState = await program.account.marketplaceState.fetch(
@@ -401,7 +388,7 @@ describe("sol-cb", () => {
 
     for (let i = 0; i < 3; i++) {
       console.log(`\nCampaign ${i + 1}:`);
-      console.log(`- ID: ${bytesToHex(campaignIds[i])}`);
+      console.log(`- Counter: ${campaignCounters[i]}`);
       console.log(`- PDA: ${campaignPdas[i].toString()}`);
       console.log(`- KOL: ${campaignParams[i].kol.toString()}`);
       console.log(`- Amount: ${campaignParams[i].amount.toString()}`);
