@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("84Dytyu5N3RxPvcLPdfqMUmUW2YN8AW9KjzF4Yj4okW8");
+declare_id!("Ew9nCJYTRAC3J2gGGDptfPsvLPS8zSbQWf9GkGxmZNYv");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -212,14 +212,19 @@ pub mod sol_cb {
     }
 
     pub fn fulfil_project_campaign(ctx: Context<FulfilProjectCampaign>) -> Result<()> {
-        let campaign = &mut ctx.accounts.campaign;
-
-        if campaign.campaign_status != CampaignStatus::Accepted {
+        // Check campaign status first
+        if ctx.accounts.campaign.campaign_status != CampaignStatus::Accepted {
             return err!(CustomErrorCode::InvalidCampaignStatus);
         }
 
+        let bump = ctx.bumps.campaign;
+
+        // Extract all the data we need before doing any mutable operations
+        let creator_address = ctx.accounts.campaign.creator_address;
+        let counter = ctx.accounts.campaign.counter;
+        let total_amount = ctx.accounts.campaign.amount_offered;
+
         // Calculate amounts based on percentages
-        let total_amount = campaign.amount_offered;
         let kol_amount = total_amount
             .checked_mul(KOL_SHARE_PERCENTAGE)
             .unwrap()
@@ -231,37 +236,52 @@ pub mod sol_cb {
             .checked_div(DIVIDER)
             .unwrap();
 
+        // Get campaign ID for logging
+        let campaign_id = ctx.accounts.campaign.id;
+
+        // Set up seeds for signing
+        let seeds = &[
+            b"campaign",
+            creator_address.as_ref(),
+            &counter.to_le_bytes(),
+            &[bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
         // Transfer tokens to KOL (90%)
         token::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.creator_token_account.to_account_info(),
+                    from: ctx.accounts.campaign_token_account.to_account_info(),
                     to: ctx.accounts.kol_token_account.to_account_info(),
-                    authority: ctx.accounts.creator.to_account_info(),
+                    authority: ctx.accounts.campaign.to_account_info(),
                 },
+                signer_seeds,
             ),
             kol_amount,
         )?;
 
         // Transfer tokens to Owner (10%)
         token::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.creator_token_account.to_account_info(),
+                    from: ctx.accounts.campaign_token_account.to_account_info(),
                     to: ctx.accounts.owner_token_account.to_account_info(),
-                    authority: ctx.accounts.creator.to_account_info(),
+                    authority: ctx.accounts.campaign.to_account_info(),
                 },
+                signer_seeds,
             ),
             owner_amount,
         )?;
 
-        campaign.campaign_status = CampaignStatus::Fulfilled;
+        // Update campaign status
+        ctx.accounts.campaign.campaign_status = CampaignStatus::Fulfilled;
 
         msg!(
             "Campaign fulfilled with ID: {:?}. Transferred {} to KOL and {} to owner",
-            campaign.id,
+            campaign_id,
             kol_amount,
             owner_amount
         );
@@ -362,15 +382,11 @@ pub struct FulfilProjectCampaign<'info> {
     )]
     pub campaign: Account<'info, Campaign>,
 
-    #[account(mut)]
-    pub creator: Signer<'info>,
-
-    #[account(
-        mut,
-        constraint = creator_token_account.owner == creator.key(),
-        constraint = creator_token_account.mint == marketplace_state.token_mint
+    #[account(mut,
+        constraint = campaign_token_account.owner == campaign.key(),
+        constraint = campaign_token_account.mint == marketplace_state.token_mint
     )]
-    pub creator_token_account: Account<'info, TokenAccount>,
+    pub campaign_token_account: Account<'info, TokenAccount>,
 
     #[account(
         mut,

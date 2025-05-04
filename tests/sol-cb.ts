@@ -2,6 +2,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { BN, Program } from "@coral-xyz/anchor";
 import {
   createTransferInstruction,
+  getAssociatedTokenAddress,
   getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
@@ -33,6 +34,7 @@ describe("sol-cb", () => {
   // Program PDAs and variables
   let marketplacePda: PublicKey;
   let campaignPda: PublicKey;
+  let campaignTokenAccount: PublicKey;
   let campaignCounter = 0;
   const tokenMint = new PublicKey(
     "D3Z5GzWh2E5Sh22nPzV6ambwFd8abfjp4kcqAJyeNoRg"
@@ -73,6 +75,15 @@ describe("sol-cb", () => {
     }
 
     try {
+      const campaignBalance = await provider.connection.getTokenAccountBalance(
+        campaignTokenAccount
+      );
+      console.log(`Campaign token balance: ${campaignBalance.value.amount}`);
+    } catch (e) {
+      console.log(`Campaign token account not found or has no balance`);
+    }
+
+    try {
       const kolBalance = await provider.connection.getTokenAccountBalance(
         kolTokenAccount
       );
@@ -98,35 +109,6 @@ describe("sol-cb", () => {
       [Buffer.from("marketplace")],
       program.programId
     );
-
-    // Fund accounts for testing
-    // const airdropCreator = await provider.connection.requestAirdrop(
-    //   creator.publicKey,
-    //   10 * anchor.web3.LAMPORTS_PER_SOL
-    // );
-    // await provider.connection.confirmTransaction(airdropCreator);
-
-    // const airdropKol = await provider.connection.requestAirdrop(
-    //   kol.publicKey,
-    //   10 * anchor.web3.LAMPORTS_PER_SOL
-    // );
-    // await provider.connection.confirmTransaction(airdropKol);
-
-    // Fund owner if needed
-    // try {
-    //   const ownerBalance = await provider.connection.getBalance(
-    //     owner.publicKey
-    //   );
-    //   if (ownerBalance < anchor.web3.LAMPORTS_PER_SOL) {
-    //     const airdropOwner = await provider.connection.requestAirdrop(
-    //       owner.publicKey,
-    //       10 * anchor.web3.LAMPORTS_PER_SOL
-    //     );
-    //     await provider.connection.confirmTransaction(airdropOwner);
-    //   }
-    // } catch (e) {
-    //   console.log("Error checking owner balance:", e);
-    // }
 
     // Create token accounts for all participants
     creatorTokenAccount = (
@@ -250,6 +232,13 @@ describe("sol-cb", () => {
       program.programId
     );
 
+    // Get campaign token account address
+    campaignTokenAccount = await getAssociatedTokenAddress(
+      tokenMint,
+      campaignPda,
+      true // allowOwnerOffCurve
+    );
+
     await program.methods
       .createNewCampaign(
         kol.publicKey,
@@ -272,6 +261,45 @@ describe("sol-cb", () => {
     expect(campaign.amountOffered.toString()).to.equal(
       OFFERING_AMOUNT.toString()
     );
+
+    // Create and fund the campaign token account
+    try {
+      // Create the token account for the campaign
+      const createAccountIx = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        provider.wallet.payer,
+        tokenMint,
+        campaignPda,
+        true // allowOwnerOffCurve
+      );
+
+      console.log(
+        `Campaign token account created: ${createAccountIx.address.toString()}`
+      );
+      campaignTokenAccount = createAccountIx.address;
+
+      // Transfer tokens from creator to campaign token account
+      const transferTx = new anchor.web3.Transaction().add(
+        createTransferInstruction(
+          creatorTokenAccount,
+          campaignTokenAccount,
+          creator.publicKey,
+          OFFERING_AMOUNT.toNumber()
+        )
+      );
+
+      const txSignature = await provider.connection.sendTransaction(
+        transferTx,
+        [creator]
+      );
+
+      await provider.connection.confirmTransaction(txSignature);
+      console.log(
+        `Transferred ${OFFERING_AMOUNT.toString()} tokens to campaign account. Tx: ${txSignature}`
+      );
+    } catch (e) {
+      console.log(`Error setting up campaign token account: ${e}`);
+    }
 
     // Step 4: Accept campaign by KOL
     console.log("Accepting campaign...");
@@ -318,13 +346,12 @@ describe("sol-cb", () => {
           marketplaceState: marketplacePda,
           owner: owner.publicKey,
           campaign: campaignPda,
-          creator: creator.publicKey,
-          creatorTokenAccount: creatorTokenAccount,
+          campaignTokenAccount: campaignTokenAccount,
           kolTokenAccount: kolTokenAccount,
           ownerTokenAccount: ownerTokenAccount,
           tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
         })
-        .signers([owner, creator])
+        .signers([owner])
         .rpc();
 
       campaign = await logCampaignInfo(campaignPda, "Fulfilled Campaign");
