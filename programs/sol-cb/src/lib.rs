@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("DhmJw64wiY46tmx5tetA41wwuoEGFUHhnsMduCVxAkcv");
+declare_id!("84Dytyu5N3RxPvcLPdfqMUmUW2YN8AW9KjzF4Yj4okW8");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -43,12 +44,14 @@ impl Space for Campaign {
 pub struct MarketplaceState {
     pub owner: Pubkey,
     pub campaign_counter: u32,
+    pub token_mint: Pubkey, // Token mint address for payments
 }
 
 impl Space for MarketplaceState {
     const INIT_SPACE: usize = 8 + // Discriminator
         32 + // owner
-        4; // campaign_counter
+        4 + // campaign_counter
+        32; // token_mint
 }
 
 #[program]
@@ -58,6 +61,8 @@ pub mod sol_cb {
     // ------------------ GLOBAL CONSTANTS ------------------
     pub const DIVIDER: u64 = 10_000;
     pub const BASE_USDC_DECIMALS: u8 = 6;
+    pub const KOL_SHARE_PERCENTAGE: u64 = 9000; // 90% of the total amount
+    pub const OWNER_SHARE_PERCENTAGE: u64 = 1000; // 10% of the total amount
 
     // ------------------ ERRORS ------------------
     #[error_code]
@@ -74,11 +79,14 @@ pub mod sol_cb {
         InvalidTimeParameters,
         #[msg("Invalid amount")]
         InvalidAmount,
+        #[msg("Insufficient funds for transfer")]
+        InsufficientFunds,
     }
 
-    pub fn initialize(ctx: Context<InitializeMarketplace>) -> Result<()> {
+    pub fn initialize(ctx: Context<InitializeMarketplace>, token_mint: Pubkey) -> Result<()> {
         ctx.accounts.marketplace_state.owner = ctx.accounts.owner.key();
         ctx.accounts.marketplace_state.campaign_counter = 0;
+        ctx.accounts.marketplace_state.token_mint = token_mint;
         Ok(())
     }
 
@@ -210,9 +218,53 @@ pub mod sol_cb {
             return err!(CustomErrorCode::InvalidCampaignStatus);
         }
 
+        // Calculate amounts based on percentages
+        let total_amount = campaign.amount_offered;
+        let kol_amount = total_amount
+            .checked_mul(KOL_SHARE_PERCENTAGE)
+            .unwrap()
+            .checked_div(DIVIDER)
+            .unwrap();
+        let owner_amount = total_amount
+            .checked_mul(OWNER_SHARE_PERCENTAGE)
+            .unwrap()
+            .checked_div(DIVIDER)
+            .unwrap();
+
+        // Transfer tokens to KOL (90%)
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.creator_token_account.to_account_info(),
+                    to: ctx.accounts.kol_token_account.to_account_info(),
+                    authority: ctx.accounts.creator.to_account_info(),
+                },
+            ),
+            kol_amount,
+        )?;
+
+        // Transfer tokens to Owner (10%)
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.creator_token_account.to_account_info(),
+                    to: ctx.accounts.owner_token_account.to_account_info(),
+                    authority: ctx.accounts.creator.to_account_info(),
+                },
+            ),
+            owner_amount,
+        )?;
+
         campaign.campaign_status = CampaignStatus::Fulfilled;
 
-        msg!("Campaign fulfilled with ID: {:?}", campaign.id);
+        msg!(
+            "Campaign fulfilled with ID: {:?}. Transferred {} to KOL and {} to owner",
+            campaign.id,
+            kol_amount,
+            owner_amount
+        );
 
         Ok(())
     }
@@ -299,14 +351,42 @@ pub struct FulfilProjectCampaign<'info> {
         bump,
     )]
     pub marketplace_state: Account<'info, MarketplaceState>,
+
     #[account(mut)]
     pub owner: Signer<'info>,
+
     #[account(
         mut,
         seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.counter.to_le_bytes()],
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
+
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = creator_token_account.owner == creator.key(),
+        constraint = creator_token_account.mint == marketplace_state.token_mint
+    )]
+    pub creator_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = kol_token_account.owner == campaign.selected_kol,
+        constraint = kol_token_account.mint == marketplace_state.token_mint
+    )]
+    pub kol_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_token_account.owner == marketplace_state.owner,
+        constraint = owner_token_account.mint == marketplace_state.token_mint
+    )]
+    pub owner_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[event]
