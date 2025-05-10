@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("Ew9nCJYTRAC3J2gGGDptfPsvLPS8zSbQWf9GkGxmZNYv");
+declare_id!("8zba4VznvCQgkEvUkY2WYmvVxv3pxPjr7Jaj8XkXXith");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -184,6 +184,46 @@ pub mod sol_cb {
         Ok(())
     }
 
+    pub fn discard_project_campaign(ctx: Context<DiscardProjectCampaign>) -> Result<()> {
+        // Extract values before mutable borrow
+        let creator_address = ctx.accounts.campaign.creator_address;
+        let counter = ctx.accounts.campaign.counter;
+        let campaign_balance = ctx.accounts.campaign_token_account.amount;
+
+        if creator_address != ctx.accounts.creator.key() {
+            return err!(CustomErrorCode::Unauthorized);
+        }
+
+        if campaign_balance > 0 {
+            let bump = ctx.bumps.campaign;
+            let seeds = &[
+                b"campaign",
+                creator_address.as_ref(),
+                &counter.to_le_bytes(),
+                &[bump],
+            ];
+            let signer_seeds = &[&seeds[..]];
+
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.campaign_token_account.to_account_info(),
+                        to: ctx.accounts.creator_token_account.to_account_info(),
+                        authority: ctx.accounts.campaign.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                campaign_balance,
+            )?;
+
+            msg!("Transferred {} tokens back to creator", campaign_balance);
+        }
+
+        ctx.accounts.campaign.campaign_status = CampaignStatus::Discarded;
+        Ok(())
+    }
+
     pub fn accept_project_campaign(ctx: Context<AcceptProjectCampaign>) -> Result<()> {
         let campaign = &mut ctx.accounts.campaign;
         let current_time = Clock::get()?.unix_timestamp;
@@ -361,6 +401,42 @@ pub struct AcceptProjectCampaign<'info> {
         bump,
     )]
     pub campaign: Account<'info, Campaign>,
+}
+
+#[derive(Accounts)]
+pub struct DiscardProjectCampaign<'info> {
+    #[account(
+        mut,
+        seeds = [b"marketplace"],
+        bump,
+    )]
+    pub marketplace_state: Account<'info, MarketplaceState>,
+
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"campaign", campaign.creator_address.as_ref(), &campaign.counter.to_le_bytes()],
+        bump,
+    )]
+    pub campaign: Account<'info, Campaign>,
+
+    #[account(
+        mut,
+        constraint = campaign_token_account.owner == campaign.key(),
+        constraint = campaign_token_account.mint == marketplace_state.token_mint
+    )]
+    pub campaign_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = creator_token_account.owner == campaign.creator_address,
+        constraint = creator_token_account.mint == marketplace_state.token_mint
+    )]
+    pub creator_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
