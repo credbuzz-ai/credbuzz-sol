@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("8zba4VznvCQgkEvUkY2WYmvVxv3pxPjr7Jaj8XkXXith");
+declare_id!("8EnaHf5JhQYB9GYqLv5RVPLe4AZC4d1GJtGLPSjWwS6N");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
