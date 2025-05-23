@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, TokenAccount, Transfer};
 
-declare_id!("8EnaHf5JhQYB9GYqLv5RVPLe4AZC4d1GJtGLPSjWwS6N");
+declare_id!("G3ZGrGRnEqykmqomTuPJTdw75RNfJLsGhScYLKDoU2vh");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -19,6 +19,7 @@ pub struct Campaign {
     pub counter: u32,
     pub created_at: i64,
     pub creator_address: Pubkey,
+    pub token_mint: Pubkey,
     pub selected_kol: Pubkey,
     pub offer_ends_in: i64,
     pub promotion_ends_in: i64,
@@ -32,6 +33,7 @@ impl Space for Campaign {
         4 + // counter
         8 + // created_at
         32 + // creator_address
+        32 + // token_mint
         32 + // selected_kol
         8 + // offer_ends_in
         8 + // promotion_ends_in
@@ -44,14 +46,17 @@ impl Space for Campaign {
 pub struct MarketplaceState {
     pub owner: Pubkey,
     pub campaign_counter: u32,
-    pub token_mint: Pubkey, // Token mint address for payments
+    pub allowed_tokens: Vec<Pubkey>, // Allowed tokens for payments
+    pub token_decimals: Vec<u8>,     // Token decimals in same order as allowed_tokens
 }
 
 impl Space for MarketplaceState {
     const INIT_SPACE: usize = 8 + // Discriminator
         32 + // owner
         4 + // campaign_counter
-        32; // token_mint
+        (32 * 10) + // allowed_tokens (max 10 tokens)
+        10 + // token_decimals (max 10 tokens)
+        64; // extra padding for safety
 }
 
 #[program]
@@ -60,7 +65,6 @@ pub mod sol_cb {
 
     // ------------------ GLOBAL CONSTANTS ------------------
     pub const DIVIDER: u64 = 10_000;
-    pub const BASE_USDC_DECIMALS: u8 = 6;
     pub const KOL_SHARE_PERCENTAGE: u64 = 9000; // 90% of the total amount
     pub const OWNER_SHARE_PERCENTAGE: u64 = 1000; // 10% of the total amount
 
@@ -81,12 +85,27 @@ pub mod sol_cb {
         InvalidAmount,
         #[msg("Insufficient funds for transfer")]
         InsufficientFunds,
+        #[msg("Invalid parameters")]
+        InvalidParameters,
+        #[msg("Too many tokens")]
+        TooManyTokens,
     }
 
-    pub fn initialize(ctx: Context<InitializeMarketplace>, token_mint: Pubkey) -> Result<()> {
+    pub fn initialize(
+        ctx: Context<InitializeMarketplace>,
+        allowed_tokens: Vec<Pubkey>,
+        token_decimals: Vec<u8>,
+    ) -> Result<()> {
+        require!(
+            allowed_tokens.len() == token_decimals.len(),
+            CustomErrorCode::InvalidParameters
+        );
+        require!(allowed_tokens.len() <= 10, CustomErrorCode::TooManyTokens);
+
         ctx.accounts.marketplace_state.owner = ctx.accounts.owner.key();
         ctx.accounts.marketplace_state.campaign_counter = 0;
-        ctx.accounts.marketplace_state.token_mint = token_mint;
+        ctx.accounts.marketplace_state.allowed_tokens = allowed_tokens;
+        ctx.accounts.marketplace_state.token_decimals = token_decimals;
         Ok(())
     }
 
@@ -133,6 +152,7 @@ pub mod sol_cb {
         campaign.counter = counter;
         campaign.created_at = current_time;
         campaign.creator_address = ctx.accounts.creator.key();
+        campaign.token_mint = ctx.accounts.token_mint.key();
         campaign.selected_kol = selected_kol;
         campaign.offer_ends_in = offer_ends_in;
         campaign.promotion_ends_in = promotion_ends_in;
@@ -170,6 +190,7 @@ pub mod sol_cb {
             return err!(CustomErrorCode::Unauthorized);
         }
 
+        campaign.token_mint = ctx.accounts.token_mint.key();
         campaign.selected_kol = selected_kol;
         campaign.promotion_ends_in = promotion_ends_in;
         campaign.offer_ends_in = offer_ends_in;
@@ -202,6 +223,9 @@ pub mod sol_cb {
                 &counter.to_le_bytes(),
                 &[bump],
             ];
+
+            ctx.accounts.campaign.campaign_status = CampaignStatus::Discarded;
+
             let signer_seeds = &[&seeds[..]];
 
             token::transfer(
@@ -220,7 +244,6 @@ pub mod sol_cb {
             msg!("Transferred {} tokens back to creator", campaign_balance);
         }
 
-        ctx.accounts.campaign.campaign_status = CampaignStatus::Discarded;
         Ok(())
     }
 
@@ -279,6 +302,9 @@ pub mod sol_cb {
         // Get campaign ID for logging
         let campaign_id = ctx.accounts.campaign.id;
 
+        // Update campaign status
+        ctx.accounts.campaign.campaign_status = CampaignStatus::Fulfilled;
+
         // Set up seeds for signing
         let seeds = &[
             b"campaign",
@@ -315,9 +341,6 @@ pub mod sol_cb {
             ),
             owner_amount,
         )?;
-
-        // Update campaign status
-        ctx.accounts.campaign.campaign_status = CampaignStatus::Fulfilled;
 
         msg!(
             "Campaign fulfilled with ID: {:?}. Transferred {} to KOL and {} to owner",
@@ -356,6 +379,10 @@ pub struct CreateNewCampaign<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
     #[account(
+        constraint = token_mint.key() == marketplace_state.allowed_tokens[0]
+    )]
+    pub token_mint: Account<'info, Mint>,
+    #[account(
         init,
         payer = creator,
         space = Campaign::INIT_SPACE,
@@ -383,6 +410,12 @@ pub struct UpdateCampaign<'info> {
         constraint = campaign.creator_address == creator.key() @ CustomErrorCode::Unauthorized
     )]
     pub campaign: Account<'info, Campaign>,
+
+    #[account(mut,
+        constraint = token_mint.key() == campaign.token_mint
+    )]
+    pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, anchor_spl::token::Token>,
 }
 
 #[derive(Accounts)]
@@ -425,18 +458,23 @@ pub struct DiscardProjectCampaign<'info> {
     #[account(
         mut,
         constraint = campaign_token_account.owner == campaign.key(),
-        constraint = campaign_token_account.mint == marketplace_state.token_mint
+        constraint = marketplace_state.allowed_tokens.contains(&campaign_token_account.mint)
     )]
     pub campaign_token_account: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = creator_token_account.owner == campaign.creator_address,
-        constraint = creator_token_account.mint == marketplace_state.token_mint
+        constraint = marketplace_state.allowed_tokens.contains(&creator_token_account.mint)
     )]
     pub creator_token_account: Account<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
+    #[account(
+        mut,
+        constraint = token_mint.key() == campaign.token_mint
+    )]
+    pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, anchor_spl::token::Token>,
 }
 
 #[derive(Accounts)]
@@ -460,25 +498,30 @@ pub struct FulfilProjectCampaign<'info> {
 
     #[account(mut,
         constraint = campaign_token_account.owner == campaign.key(),
-        constraint = campaign_token_account.mint == marketplace_state.token_mint
+        constraint = marketplace_state.allowed_tokens.contains(&campaign_token_account.mint)
     )]
     pub campaign_token_account: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = kol_token_account.owner == campaign.selected_kol,
-        constraint = kol_token_account.mint == marketplace_state.token_mint
+        constraint = marketplace_state.allowed_tokens.contains(&kol_token_account.mint)
     )]
     pub kol_token_account: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = owner_token_account.owner == marketplace_state.owner,
-        constraint = owner_token_account.mint == marketplace_state.token_mint
+        constraint = marketplace_state.allowed_tokens.contains(&owner_token_account.mint)
     )]
     pub owner_token_account: Account<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
+    #[account(
+        mut,
+        constraint = token_mint.key() == campaign.token_mint
+    )]
+    pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, anchor_spl::token::Token>,
 }
 
 #[event]

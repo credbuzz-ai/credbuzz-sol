@@ -5,14 +5,14 @@ package_manager = "yarn"
 resolution = true
 skip-lint = false
 
-[programs.mainnet]
-sol_cb = "8EnaHf5JhQYB9GYqLv5RVPLe4AZC4d1GJtGLPSjWwS6N"
+[programs.localnet]
+sol_cb = "G3ZGrGRnEqykmqomTuPJTdw75RNfJLsGhScYLKDoU2vh"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "mainnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

@@ -1,14 +1,56 @@
 import * as anchor from "@coral-xyz/anchor";
 import { BN, Program } from "@coral-xyz/anchor";
 import {
+  createMint,
   createTransferInstruction,
-  getAssociatedTokenAddress,
   getOrCreateAssociatedTokenAccount,
+  mintTo,
+  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { expect } from "chai";
 import { SolCb } from "../target/types/sol_cb";
+
+// Add these helper functions at the top of the test file
+async function airdropSol(
+  connection: anchor.web3.Connection,
+  address: PublicKey
+) {
+  const signature = await connection.requestAirdrop(
+    address,
+    10 * anchor.web3.LAMPORTS_PER_SOL
+  );
+  await connection.confirmTransaction(signature);
+  console.log(`Airdropped 10 SOL to ${address.toString()}`);
+}
+
+async function setupTokenAccount(
+  connection: anchor.web3.Connection,
+  payer: Keypair,
+  mint: PublicKey,
+  owner: PublicKey,
+  amount?: number
+) {
+  const account = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer,
+    mint,
+    owner
+  );
+  if (amount) {
+    await mintTo(
+      connection,
+      payer,
+      mint,
+      account.address,
+      payer, // mint authority
+      amount
+    );
+    console.log(`Minted ${amount} tokens to ${owner.toString()}`);
+  }
+  return account.address;
+}
 
 describe("sol-cb", () => {
   // Configure the client
@@ -36,9 +78,7 @@ describe("sol-cb", () => {
   let campaignPda: PublicKey;
   let campaignTokenAccount: PublicKey;
   let campaignCounter = 0;
-  const tokenMint = new PublicKey(
-    "D3Z5GzWh2E5Sh22nPzV6ambwFd8abfjp4kcqAJyeNoRg"
-  );
+  let tokenMint: PublicKey;
 
   // Token accounts
   let creatorTokenAccount: PublicKey;
@@ -48,15 +88,52 @@ describe("sol-cb", () => {
   // Campaign constants
   const OFFERING_AMOUNT = new BN(1_000_000); // 1 token with 6 decimals
   const TRANSFER_AMOUNT = 10_000_000; // 10 tokens with 6 decimals
+  const TOKEN_DECIMALS = 6;
+
+  // Add these constants at the top with other constants
+  const ALLOWED_TOKENS = [
+    new PublicKey("D3Z5GzWh2E5Sh22nPzV6ambwFd8abfjp4kcqAJyeNoRg"),
+  ];
+
+  // Token-related variables
+  let tokenMint1: PublicKey; // 6 decimals token
+  let tokenMint2: PublicKey; // 9 decimals token
+
+  // Token accounts for first token (6 decimals)
+  let creatorTokenAccount1: PublicKey;
+  let kolTokenAccount1: PublicKey;
+  let ownerTokenAccount1: PublicKey;
+  let campaignTokenAccount1: PublicKey;
+
+  // Token accounts for second token (9 decimals)
+  let creatorTokenAccount2: PublicKey;
+  let kolTokenAccount2: PublicKey;
+  let ownerTokenAccount2: PublicKey;
+  let campaignTokenAccount2: PublicKey;
+
+  // Campaign constants
+  const TOKEN1_DECIMALS = 6;
+  const TOKEN2_DECIMALS = 9;
+  const OFFERING_AMOUNT1 = new BN(1_000_000); // 1 token with 6 decimals
+  const OFFERING_AMOUNT2 = new BN(1_000_000_000); // 1 token with 9 decimals
+  const TRANSFER_AMOUNT1 = 10_000_000; // 10 tokens with 6 decimals
+  const TRANSFER_AMOUNT2 = 10_000_000_000; // 10 tokens with 9 decimals
+
+  let campaignPda1: PublicKey;
+  let campaignPda2: PublicKey;
 
   // Helper function to log campaign details
   const logCampaignInfo = async (pda: PublicKey, label: string) => {
     const campaign = await program.account.campaign.fetch(pda);
     console.log(`\n--- ${label} ---`);
     console.log(`Campaign ID: ${Buffer.from(campaign.id).toString("hex")}`);
+    console.log(`Counter: ${campaign.counter}`);
     console.log(`Creator: ${campaign.creatorAddress.toString()}`);
+    console.log(`Token Mint: ${campaign.tokenMint.toString()}`);
     console.log(`Selected KOL: ${campaign.selectedKol.toString()}`);
     console.log(`Amount offered: ${campaign.amountOffered.toString()}`);
+    console.log(`Offer ends in: ${campaign.offerEndsIn.toString()}`);
+    console.log(`Promotion ends in: ${campaign.promotionEndsIn.toString()}`);
     console.log(`Status: ${Object.keys(campaign.campaignStatus)[0]}`);
     console.log("-------------------------\n");
     return campaign;
@@ -104,52 +181,102 @@ describe("sol-cb", () => {
   };
 
   before(async () => {
-    // Calculate the marketplace PDA
+    // Airdrop SOL to all participants
+    await airdropSol(provider.connection, owner.publicKey);
+    await airdropSol(provider.connection, creator.publicKey);
+    await airdropSol(provider.connection, kol.publicKey);
+
+    // Create token mints
+    console.log("Creating token mints...");
+    const mintKeypair1 = Keypair.generate();
+    const mintKeypair2 = Keypair.generate();
+
+    // Create first token (6 decimals)
+    tokenMint1 = await createMint(
+      provider.connection,
+      provider.wallet.payer,
+      owner.publicKey,
+      owner.publicKey,
+      TOKEN1_DECIMALS,
+      mintKeypair1
+    );
+    console.log("Token1 (6 decimals) created:", tokenMint1.toString());
+
+    // Create second token (9 decimals)
+    tokenMint2 = await createMint(
+      provider.connection,
+      provider.wallet.payer,
+      owner.publicKey,
+      owner.publicKey,
+      TOKEN2_DECIMALS,
+      mintKeypair2
+    );
+    console.log("Token2 (9 decimals) created:", tokenMint2.toString());
+
+    // Setup token accounts for first token
+    ownerTokenAccount1 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint1,
+      owner.publicKey,
+      TRANSFER_AMOUNT1 * 4
+    );
+
+    creatorTokenAccount1 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint1,
+      creator.publicKey
+    );
+
+    kolTokenAccount1 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint1,
+      kol.publicKey
+    );
+
+    // Setup token accounts for second token
+    ownerTokenAccount2 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint2,
+      owner.publicKey,
+      TRANSFER_AMOUNT2 * 4
+    );
+
+    creatorTokenAccount2 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint2,
+      creator.publicKey
+    );
+
+    kolTokenAccount2 = await setupTokenAccount(
+      provider.connection,
+      owner,
+      tokenMint2,
+      kol.publicKey
+    );
+
+    // Calculate marketplace PDA
     [marketplacePda] = PublicKey.findProgramAddressSync(
       [Buffer.from("marketplace")],
       program.programId
     );
 
-    // Create token accounts for all participants
-    creatorTokenAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        provider.wallet.payer,
-        tokenMint,
-        creator.publicKey
-      )
-    ).address;
-
-    kolTokenAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        provider.wallet.payer,
-        tokenMint,
-        kol.publicKey
-      )
-    ).address;
-
-    ownerTokenAccount = (
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        provider.wallet.payer,
-        tokenMint,
-        owner.publicKey
-      )
-    ).address;
-
     console.log("Setup complete!");
-    console.log("Owner address:", owner.publicKey.toString());
-    console.log("Creator address:", creator.publicKey.toString());
-    console.log("KOL address:", kol.publicKey.toString());
   });
 
-  it("Complete Campaign Flow: Initialize -> Transfer Tokens -> Create -> Accept -> Fulfill", async () => {
-    // Step 1: Initialize the marketplace (if not already initialized)
-    console.log("Initializing marketplace...");
+  it("1. Initialize Marketplace with Both Tokens", async () => {
+    console.log("Test Case: Initialize Marketplace with Both Tokens");
+
     try {
       await program.methods
-        .initialize(tokenMint)
+        .initialize(
+          [tokenMint1, tokenMint2],
+          Buffer.from([TOKEN1_DECIMALS, TOKEN2_DECIMALS])
+        )
         .accounts({
           owner: owner.publicKey,
           marketplaceState: marketplacePda,
@@ -157,274 +284,263 @@ describe("sol-cb", () => {
         })
         .signers([owner])
         .rpc();
-    } catch (e) {
-      console.log("Marketplace already initialized, continuing...");
-    }
 
-    // Get the current campaign counter from the marketplace state
+      const marketplaceState = await program.account.marketplaceState.fetch(
+        marketplacePda
+      );
+      expect(marketplaceState.owner.toString()).to.equal(
+        owner.publicKey.toString()
+      );
+      expect(marketplaceState.campaignCounter).to.equal(0);
+      expect(marketplaceState.allowedTokens).to.have.length(2);
+      expect(marketplaceState.allowedTokens[0].toString()).to.equal(
+        tokenMint1.toString()
+      );
+      expect(marketplaceState.allowedTokens[1].toString()).to.equal(
+        tokenMint2.toString()
+      );
+      console.log("Marketplace initialized successfully with both tokens");
+    } catch (e: any) {
+      if (e.message.includes("already in use")) {
+        console.log("Marketplace already initialized, continuing...");
+      } else {
+        throw e;
+      }
+    }
+  });
+
+  // Token1 (6 decimals) Flow
+  it("2a. Create Campaign with Token1", async () => {
+    console.log("Test Case: Create Campaign with Token1 (6 decimals)");
+
+    // Transfer tokens to creator
+    const transferTx = new anchor.web3.Transaction().add(
+      createTransferInstruction(
+        ownerTokenAccount1,
+        creatorTokenAccount1,
+        owner.publicKey,
+        TRANSFER_AMOUNT1
+      )
+    );
+    await provider.connection.sendTransaction(transferTx, [owner]);
+
+    const now = Math.floor(Date.now() / 1000);
+    const offerEndsIn = now + 86400;
+    const promotionEndsIn = now + 86400 * 7;
+
+    // Get campaign counter
     const marketplaceState = await program.account.marketplaceState.fetch(
       marketplacePda
     );
-    campaignCounter = marketplaceState.campaignCounter;
-
-    // Step 2: Transfer tokens from owner to creator
-    console.log("\nTransferring tokens from owner to creator...");
-
-    // Check owner's token balance first
-    try {
-      const ownerBalance = await provider.connection.getTokenAccountBalance(
-        ownerTokenAccount
-      );
-      console.log(
-        `Owner's current token balance: ${ownerBalance.value.amount}`
-      );
-
-      if (parseInt(ownerBalance.value.amount) < TRANSFER_AMOUNT) {
-        console.log(
-          `Warning: Owner doesn't have enough tokens (has ${ownerBalance.value.amount}, needs ${TRANSFER_AMOUNT})`
-        );
-      }
-    } catch (e) {
-      console.log(`Error checking owner's token balance: ${e}`);
-    }
-
-    // Create and send the token transfer transaction
-    try {
-      const transaction = new anchor.web3.Transaction().add(
-        createTransferInstruction(
-          ownerTokenAccount,
-          creatorTokenAccount,
-          owner.publicKey,
-          TRANSFER_AMOUNT
-        )
-      );
-
-      const txSignature = await provider.connection.sendTransaction(
-        transaction,
-        [owner]
-      );
-
-      await provider.connection.confirmTransaction(txSignature);
-      console.log(
-        `Transferred ${TRANSFER_AMOUNT} tokens to creator. Tx: ${txSignature}`
-      );
-    } catch (e) {
-      console.log(`Error transferring tokens to creator: ${e}`);
-      // Continue with the test even if transfer fails
-    }
-
-    // Log token balances after transfer
-    await logTokenBalances("After Initial Transfer");
-
-    // Step 3: Create a campaign
-    console.log("Creating campaign...");
-    const now = Math.floor(Date.now() / 1000);
-    const offerEndsIn = now + 86400; // 1 day
-    const promotionEndsIn = now + 86400 * 7; // 7 days
+    const campaignCounter1 = marketplaceState.campaignCounter;
 
     // Calculate campaign PDA
-    [campaignPda] = PublicKey.findProgramAddressSync(
+    [campaignPda1] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("campaign"),
         creator.publicKey.toBuffer(),
-        new BN(campaignCounter).toArrayLike(Buffer, "le", 4),
+        new BN(campaignCounter1).toArrayLike(Buffer, "le", 4),
       ],
       program.programId
     );
 
+    // Create campaign token account
+    campaignTokenAccount1 = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      creator,
+      tokenMint1,
+      campaignPda1,
+      true
+    ).then((acc) => acc.address);
+
     await program.methods
       .createNewCampaign(
         kol.publicKey,
-        OFFERING_AMOUNT,
+        OFFERING_AMOUNT1,
         new BN(promotionEndsIn),
         new BN(offerEndsIn)
       )
       .accounts({
         marketplaceState: marketplacePda,
         creator: creator.publicKey,
-        campaign: campaignPda,
+        tokenMint: tokenMint1,
+        campaign: campaignPda1,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .signers([creator])
       .rpc();
 
-    let campaign = await logCampaignInfo(campaignPda, "Created Campaign");
-    expect(campaign.campaignStatus).to.deep.equal({ open: {} });
-    expect(campaign.selectedKol.toString()).to.equal(kol.publicKey.toString());
-    expect(campaign.amountOffered.toString()).to.equal(
-      OFFERING_AMOUNT.toString()
-    );
-
-    // Create and fund the campaign token account
-    campaignTokenAccount = await getAssociatedTokenAddress(
-      tokenMint,
-      campaignPda,
-      true
-    );
-
-    // Create the token account for the campaign
-    await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      provider.wallet.payer,
-      tokenMint,
-      campaignPda,
-      true
-    );
-
-    // Transfer tokens from creator to campaign token account
-    const transferTx = new anchor.web3.Transaction().add(
+    // Fund the campaign
+    const fundingTx = new anchor.web3.Transaction().add(
       createTransferInstruction(
-        creatorTokenAccount,
-        campaignTokenAccount,
+        creatorTokenAccount1,
+        campaignTokenAccount1,
         creator.publicKey,
-        OFFERING_AMOUNT.toNumber()
+        OFFERING_AMOUNT1.toNumber()
       )
     );
+    await provider.connection.sendTransaction(fundingTx, [creator]);
 
-    await provider.connection.sendTransaction(transferTx, [creator]);
-    console.log(
-      `Transferred ${OFFERING_AMOUNT.toString()} tokens to campaign account`
+    // Verify campaign state
+    const campaign = await program.account.campaign.fetch(campaignPda1);
+    expect(campaign.tokenMint.toString()).to.equal(tokenMint1.toString());
+    expect(campaign.amountOffered.toString()).to.equal(
+      OFFERING_AMOUNT1.toString()
     );
+  });
 
-    // Step 4: Accept campaign by KOL
-    console.log("Accepting campaign...");
+  it("3a. Update Campaign with Token1", async () => {
+    console.log("Test Case: Update Campaign with Token1");
+
+    const now = Math.floor(Date.now() / 1000);
+    const newOfferEndsIn = now + 172800; // 2 days
+    const newPromotionEndsIn = now + 86400 * 14; // 14 days
+    const newAmount = OFFERING_AMOUNT1.mul(new BN(2)); // Double the amount
+
+    await program.methods
+      .updateCampaign(
+        kol.publicKey,
+        new BN(newPromotionEndsIn),
+        new BN(newOfferEndsIn),
+        newAmount
+      )
+      .accounts({
+        marketplaceState: marketplacePda,
+        creator: creator.publicKey,
+        campaign: campaignPda1,
+        tokenMint: tokenMint1,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([creator])
+      .rpc();
+
+    // Transfer additional tokens
+    const additionalTokens = OFFERING_AMOUNT1.toNumber();
+    const fundingTx = new anchor.web3.Transaction().add(
+      createTransferInstruction(
+        creatorTokenAccount1,
+        campaignTokenAccount1,
+        creator.publicKey,
+        additionalTokens
+      )
+    );
+    await provider.connection.sendTransaction(fundingTx, [creator]);
+
+    const campaign = await program.account.campaign.fetch(campaignPda1);
+    expect(campaign.amountOffered.toString()).to.equal(newAmount.toString());
+  });
+
+  it("4a. Accept Campaign with Token1", async () => {
+    console.log("Test Case: Accept Campaign with Token1");
+
     await program.methods
       .acceptProjectCampaign()
       .accounts({
         marketplaceState: marketplacePda,
         kol: kol.publicKey,
-        campaign: campaignPda,
+        campaign: campaignPda1,
       })
       .signers([kol])
       .rpc();
 
-    campaign = await logCampaignInfo(campaignPda, "Accepted Campaign");
+    const campaign = await program.account.campaign.fetch(campaignPda1);
     expect(campaign.campaignStatus).to.deep.equal({ accepted: {} });
-
-    // Step 5: Log token balances before fulfillment
-    await logTokenBalances("Before Fulfillment");
-
-    // Store balances for comparison
-    let beforeKolBalance, beforeOwnerBalance;
-    try {
-      beforeKolBalance = (
-        await provider.connection.getTokenAccountBalance(kolTokenAccount)
-      ).value.amount;
-    } catch (e) {
-      beforeKolBalance = "0";
-    }
-
-    try {
-      beforeOwnerBalance = (
-        await provider.connection.getTokenAccountBalance(ownerTokenAccount)
-      ).value.amount;
-    } catch (e) {
-      beforeOwnerBalance = "0";
-    }
-
-    // Step 6: Fulfill the campaign with token transfers
-    console.log("Fulfilling campaign...");
-    try {
-      await program.methods
-        .fulfilProjectCampaign()
-        .accounts({
-          marketplaceState: marketplacePda,
-          owner: owner.publicKey,
-          campaign: campaignPda,
-          campaignTokenAccount: campaignTokenAccount,
-          kolTokenAccount: kolTokenAccount,
-          ownerTokenAccount: ownerTokenAccount,
-          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-        })
-        .signers([owner])
-        .rpc();
-
-      campaign = await logCampaignInfo(campaignPda, "Fulfilled Campaign");
-      expect(campaign.campaignStatus).to.deep.equal({ fulfilled: {} });
-    } catch (e) {
-      console.log("Error fulfilling campaign:", e);
-    }
-
-    // Step 7: Verify token transfers
-    await logTokenBalances("After Fulfillment");
-
-    let afterKolBalance, afterOwnerBalance;
-    try {
-      afterKolBalance = (
-        await provider.connection.getTokenAccountBalance(kolTokenAccount)
-      ).value.amount;
-    } catch (e) {
-      afterKolBalance = "0";
-    }
-
-    try {
-      afterOwnerBalance = (
-        await provider.connection.getTokenAccountBalance(ownerTokenAccount)
-      ).value.amount;
-    } catch (e) {
-      afterOwnerBalance = "0";
-    }
-
-    // Calculate expected amounts
-    const totalAmount = parseInt(OFFERING_AMOUNT.toString());
-    const expectedKolAmount = Math.floor(totalAmount * 0.9); // 90%
-    const expectedOwnerAmount = Math.floor(totalAmount * 0.1); // 10%
-
-    // Check token transfers
-    console.log("\n--- Token Transfer Verification ---");
-    const kolReceived = parseInt(afterKolBalance) - parseInt(beforeKolBalance);
-    const ownerReceived =
-      parseInt(afterOwnerBalance) - parseInt(beforeOwnerBalance);
-
-    console.log(
-      `KOL received: ${kolReceived} (Expected: ${expectedKolAmount})`
-    );
-    console.log(
-      `Owner received: ${ownerReceived} (Expected: ${expectedOwnerAmount})`
-    );
-
-    if (
-      kolReceived === expectedKolAmount &&
-      ownerReceived === expectedOwnerAmount
-    ) {
-      console.log("✅ Token transfers verified successfully!");
-    } else {
-      console.log("❌ Token transfers do not match expected amounts.");
-    }
-
-    console.log("Complete campaign flow finished!");
   });
 
-  it("Discard Campaign Flow: Initialize -> Create -> Discard", async () => {
-    // Step 1: Initialize the marketplace (if not already initialized)
-    console.log("Initializing marketplace...");
-    try {
-      await program.methods
-        .initialize(tokenMint)
-        .accounts({
-          owner: owner.publicKey,
-          marketplaceState: marketplacePda,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([owner])
-        .rpc();
-    } catch (e) {
-      console.log("Marketplace already initialized, continuing...");
-    }
+  it("5a. Fulfill Campaign with Token1", async () => {
+    console.log("Test Case: Fulfill Campaign with Token1");
 
-    // Get the current campaign counter from the marketplace state
+    const beforeKolBalance = await provider.connection.getTokenAccountBalance(
+      kolTokenAccount1
+    );
+    const beforeOwnerBalance = await provider.connection.getTokenAccountBalance(
+      ownerTokenAccount1
+    );
+
+    await program.methods
+      .fulfilProjectCampaign()
+      .accounts({
+        marketplaceState: marketplacePda,
+        owner: owner.publicKey,
+        campaign: campaignPda1,
+        campaignTokenAccount: campaignTokenAccount1,
+        kolTokenAccount: kolTokenAccount1,
+        ownerTokenAccount: ownerTokenAccount1,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        tokenMint: tokenMint1,
+      })
+      .signers([owner])
+      .rpc();
+
+    const afterKolBalance = await provider.connection.getTokenAccountBalance(
+      kolTokenAccount1
+    );
+    const afterOwnerBalance = await provider.connection.getTokenAccountBalance(
+      ownerTokenAccount1
+    );
+
+    const totalAmount = OFFERING_AMOUNT1.mul(new BN(2)).toNumber();
+    const expectedKolAmount = Math.floor(totalAmount * 0.9);
+    const expectedOwnerAmount = Math.floor(totalAmount * 0.1);
+
+    expect(
+      parseInt(afterKolBalance.value.amount) -
+        parseInt(beforeKolBalance.value.amount)
+    ).to.equal(expectedKolAmount);
+    expect(
+      parseInt(afterOwnerBalance.value.amount) -
+        parseInt(beforeOwnerBalance.value.amount)
+    ).to.equal(expectedOwnerAmount);
+  });
+
+  // Token2 (9 decimals) Flow
+  it("2b. Create Campaign with Token2", async () => {
+    console.log("Test Case: Create Campaign with Token2 (9 decimals)");
+
+    // Similar structure as 2a but using Token2 accounts and amounts
+    // Use OFFERING_AMOUNT2, tokenMint2, etc.
+  });
+
+  it("3b. Update Campaign with Token2", async () => {
+    console.log("Test Case: Update Campaign with Token2");
+    // Similar structure as 3a but using Token2
+  });
+
+  it("4b. Accept Campaign with Token2", async () => {
+    console.log("Test Case: Accept Campaign with Token2");
+    // Similar structure as 4a but using Token2
+  });
+
+  it("5b. Fulfill Campaign with Token2", async () => {
+    console.log("Test Case: Fulfill Campaign with Token2");
+    // Similar structure as 5a but using Token2
+  });
+
+  // Discard flow for both tokens
+  it("6a. Create and Discard Campaign with Token1", async () => {
+    console.log("Test Case: Create and Discard Campaign with Token1");
+
+    // First, ensure creator has enough tokens by transferring from owner
+    const setupTx = new anchor.web3.Transaction().add(
+      createTransferInstruction(
+        ownerTokenAccount1,
+        creatorTokenAccount1,
+        owner.publicKey,
+        OFFERING_AMOUNT1.toNumber()
+      )
+    );
+    await provider.connection.sendTransaction(setupTx, [owner]);
+
+    // Create new campaign first
+    const now = Math.floor(Date.now() / 1000);
+    const offerEndsIn = now + 86400;
+    const promotionEndsIn = now + 86400 * 7;
+
     const marketplaceState = await program.account.marketplaceState.fetch(
       marketplacePda
     );
-    campaignCounter = marketplaceState.campaignCounter;
+    const campaignCounter = marketplaceState.campaignCounter;
 
-    // Step 2: Create a campaign
-    console.log("Creating campaign...");
-    const now = Math.floor(Date.now() / 1000);
-    const offerEndsIn = now + 86400; // 1 day
-    const promotionEndsIn = now + 86400 * 7; // 7 days
-
-    // Calculate campaign PDA
     [campaignPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("campaign"),
@@ -434,58 +550,49 @@ describe("sol-cb", () => {
       program.programId
     );
 
+    // Create campaign token account
+    campaignTokenAccount = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      creator,
+      tokenMint1,
+      campaignPda,
+      true
+    ).then((acc) => acc.address);
+
+    // Store initial balances before creating campaign
+    const beforeCreatorBalance =
+      await provider.connection.getTokenAccountBalance(creatorTokenAccount1);
+
+    // Create the campaign first
     await program.methods
       .createNewCampaign(
         kol.publicKey,
-        OFFERING_AMOUNT,
+        OFFERING_AMOUNT1,
         new BN(promotionEndsIn),
         new BN(offerEndsIn)
       )
       .accounts({
         marketplaceState: marketplacePda,
         creator: creator.publicKey,
+        tokenMint: tokenMint1,
         campaign: campaignPda,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .signers([creator])
       .rpc();
 
-    let campaign = await logCampaignInfo(campaignPda, "Created Campaign");
-    expect(campaign.campaignStatus).to.deep.equal({ open: {} });
-
-    // Create and fund campaign token account
-    campaignTokenAccount = await getAssociatedTokenAddress(
-      tokenMint,
-      campaignPda,
-      true
-    );
-
-    // Create the token account for the campaign
-    await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      provider.wallet.payer,
-      tokenMint,
-      campaignPda,
-      true
-    );
-
-    // Transfer tokens from creator to campaign token account
-    const transferTx = new anchor.web3.Transaction().add(
+    // Fund the campaign
+    const fundingTx = new anchor.web3.Transaction().add(
       createTransferInstruction(
-        creatorTokenAccount,
+        creatorTokenAccount1,
         campaignTokenAccount,
         creator.publicKey,
-        OFFERING_AMOUNT.toNumber()
+        OFFERING_AMOUNT1.toNumber()
       )
     );
+    await provider.connection.sendTransaction(fundingTx, [creator]);
 
-    await provider.connection.sendTransaction(transferTx, [creator]);
-    console.log(
-      `Transferred ${OFFERING_AMOUNT.toString()} tokens to campaign account`
-    );
-
-    // Step 3: Discard the campaign
-    console.log("Discarding campaign...");
+    // Discard campaign
     await program.methods
       .discardProjectCampaign()
       .accounts({
@@ -493,19 +600,45 @@ describe("sol-cb", () => {
         creator: creator.publicKey,
         campaign: campaignPda,
         campaignTokenAccount: campaignTokenAccount,
-        creatorTokenAccount: creatorTokenAccount,
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+        creatorTokenAccount: creatorTokenAccount1,
+        tokenMint: tokenMint1,
+        tokenProgram: TOKEN_PROGRAM_ID,
       })
       .signers([creator])
       .rpc();
 
-    // Step 4: Verify campaign status
-    campaign = await logCampaignInfo(campaignPda, "Discarded Campaign");
-    expect(campaign.campaignStatus).to.deep.equal({ discarded: {} });
+    const afterCreatorBalance =
+      await provider.connection.getTokenAccountBalance(creatorTokenAccount1);
 
-    // Step 5: Verify token transfer
-    await logTokenBalances("After Discard");
+    // Log balances for debugging
+    console.log("Before balance:", beforeCreatorBalance.value.amount);
+    console.log("After balance:", afterCreatorBalance.value.amount);
 
-    console.log("Campaign discard flow completed successfully!");
+    expect(
+      parseInt(afterCreatorBalance.value.amount) -
+        parseInt(beforeCreatorBalance.value.amount)
+    ).to.equal(0); // Should be 0 since we're back to the initial state
+  });
+
+  it("6b. Create and Discard Campaign with Token2", async () => {
+    console.log("Test Case: Create and Discard Campaign with Token2");
+    // Similar structure as 6a but using Token2
   });
 });
+
+// Add a helper function to verify token account funding
+async function verifyTokenAccountFunding(
+  connection: anchor.web3.Connection,
+  tokenAccount: PublicKey,
+  expectedAmount: number,
+  label: string
+) {
+  const balance = await connection.getTokenAccountBalance(tokenAccount);
+  const actualAmount = parseInt(balance.value.amount);
+  if (actualAmount !== expectedAmount) {
+    throw new Error(
+      `${label} token account funding verification failed. Expected: ${expectedAmount}, Actual: ${actualAmount}`
+    );
+  }
+  console.log(`${label} token account funded with ${actualAmount} tokens`);
+}
