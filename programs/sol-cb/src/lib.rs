@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_spl::token::{self, Mint, TokenAccount, Transfer};
 
-declare_id!("G3ZGrGRnEqykmqomTuPJTdw75RNfJLsGhScYLKDoU2vh");
+declare_id!("7fHedDQScjY4dRUhuqNBkx4vgdi5RSv9LdVbonCn53PR");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -10,6 +10,13 @@ pub enum CampaignStatus {
     Accepted,
     Fulfilled,
     Unfulfilled,
+    Discarded,
+}
+
+#[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
+pub enum OpenCampaignStatus {
+    Published,
+    Fulfilled,
     Discarded,
 }
 
@@ -27,6 +34,18 @@ pub struct Campaign {
     pub campaign_status: CampaignStatus,
 }
 
+#[account]
+pub struct OpenCampaign {
+    pub id: [u8; 4],
+    pub counter: u32,
+    pub created_at: i64,
+    pub creator_address: Pubkey,
+    pub token_mint: Pubkey,
+    pub promotion_ends_in: i64,
+    pub pool_amount: u64,
+    pub campaign_status: OpenCampaignStatus,
+}
+
 impl Space for Campaign {
     const INIT_SPACE: usize = 8 + // Discriminator
         4 + // id
@@ -38,6 +57,19 @@ impl Space for Campaign {
         8 + // offer_ends_in
         8 + // promotion_ends_in
         8 + // amount_offered
+        1 + // campaign_status
+        64; // extra padding for safety
+}
+
+impl Space for OpenCampaign {
+    const INIT_SPACE: usize = 8 + // Discriminator
+        4 + // id
+        4 + // counter
+        8 + // created_at
+        32 + // creator_address
+        32 + // token_mint
+        8 + // promotion_ends_in
+        8 + // pool_amount
         1 + // campaign_status
         64; // extra padding for safety
 }
@@ -54,8 +86,8 @@ impl Space for MarketplaceState {
     const INIT_SPACE: usize = 8 + // Discriminator
         32 + // owner
         4 + // campaign_counter
-        (32 * 10) + // allowed_tokens (max 10 tokens)
-        10 + // token_decimals (max 10 tokens)
+        (32 * 20) + // allowed_tokens (max 20 tokens)
+        20 + // token_decimals (max 20 tokens)
         64; // extra padding for safety
 }
 
@@ -89,6 +121,8 @@ pub mod sol_cb {
         InvalidParameters,
         #[msg("Too many tokens")]
         TooManyTokens,
+        #[msg("Invalid open campaign status")]
+        InvalidOpenCampaignStatus,
     }
 
     pub fn initialize(
@@ -351,6 +385,118 @@ pub mod sol_cb {
 
         Ok(())
     }
+
+    pub fn create_open_campaign(
+        ctx: Context<CreateOpenCampaign>,
+        promotion_ends_in: i64,
+        pool_amount: u64,
+    ) -> Result<()> {
+        if pool_amount == 0 {
+            return err!(CustomErrorCode::InvalidAmount);
+        }
+
+        let current_time = Clock::get()?.unix_timestamp;
+        if promotion_ends_in <= current_time {
+            return err!(CustomErrorCode::InvalidTimeParameters);
+        }
+
+        // Generate campaign ID similar to regular campaigns
+        let creator_key = ctx.accounts.creator.key();
+        let counter = ctx.accounts.marketplace_state.campaign_counter;
+
+        let mut data_to_hash = vec![];
+        data_to_hash.extend_from_slice(&current_time.to_le_bytes());
+        data_to_hash.extend_from_slice(creator_key.as_ref());
+        data_to_hash.extend_from_slice(&counter.to_le_bytes());
+
+        let hashed = hash(&data_to_hash).to_bytes();
+        let id_data = [hashed[0], hashed[1], hashed[2], hashed[3]];
+
+        // Increment the counter
+        ctx.accounts.marketplace_state.campaign_counter = ctx
+            .accounts
+            .marketplace_state
+            .campaign_counter
+            .checked_add(1)
+            .unwrap();
+
+        let campaign = &mut ctx.accounts.open_campaign;
+        campaign.id = id_data;
+        campaign.counter = counter;
+        campaign.created_at = current_time;
+        campaign.creator_address = ctx.accounts.creator.key();
+        campaign.token_mint = ctx.accounts.token_mint.key();
+        campaign.promotion_ends_in = promotion_ends_in;
+        campaign.pool_amount = pool_amount;
+        campaign.campaign_status = OpenCampaignStatus::Published;
+
+        msg!(
+            "Open campaign created with ID: {:?}, creator: {:?} and counter: {:?}",
+            id_data,
+            ctx.accounts.creator.key(),
+            counter
+        );
+
+        Ok(())
+    }
+
+    pub fn complete_open_campaign(
+        ctx: Context<CompleteOpenCampaign>,
+        is_fulfilled: bool,
+    ) -> Result<()> {
+        // Check authorization first
+        if ctx.accounts.marketplace_state.owner != ctx.accounts.owner.key() {
+            return err!(CustomErrorCode::Unauthorized);
+        }
+
+        // Store the status check result before mutable borrow
+        let is_published =
+            ctx.accounts.open_campaign.campaign_status == OpenCampaignStatus::Published;
+        if !is_published {
+            return err!(CustomErrorCode::InvalidOpenCampaignStatus);
+        }
+
+        // Get amount before mutable borrow
+        let pool_amount = ctx.accounts.open_campaign.pool_amount;
+
+        // Update status
+        ctx.accounts.open_campaign.campaign_status = if is_fulfilled {
+            OpenCampaignStatus::Fulfilled
+        } else {
+            OpenCampaignStatus::Discarded
+        };
+
+        // Transfer pool amount to owner
+        let bump = ctx.bumps.open_campaign;
+        let seeds = &[
+            b"open_campaign",
+            ctx.accounts.open_campaign.creator_address.as_ref(),
+            &ctx.accounts.open_campaign.counter.to_le_bytes(),
+            &[bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.campaign_token_account.to_account_info(),
+                    to: ctx.accounts.owner_token_account.to_account_info(),
+                    authority: ctx.accounts.open_campaign.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            pool_amount,
+        )?;
+
+        msg!(
+            "Open campaign completed with ID: {:?}, status: {:?}",
+            ctx.accounts.open_campaign.id,
+            ctx.accounts.open_campaign.campaign_status
+        );
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -379,7 +525,7 @@ pub struct CreateNewCampaign<'info> {
     #[account(mut)]
     pub creator: Signer<'info>,
     #[account(
-        constraint = token_mint.key() == marketplace_state.allowed_tokens[0]
+        constraint = marketplace_state.allowed_tokens.contains(&token_mint.key())
     )]
     pub token_mint: Account<'info, Mint>,
     #[account(
@@ -521,6 +667,67 @@ pub struct FulfilProjectCampaign<'info> {
         constraint = token_mint.key() == campaign.token_mint
     )]
     pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, anchor_spl::token::Token>,
+}
+
+#[derive(Accounts)]
+pub struct CreateOpenCampaign<'info> {
+    #[account(
+        mut,
+        seeds = [b"marketplace"],
+        bump,
+    )]
+    pub marketplace_state: Account<'info, MarketplaceState>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    #[account(
+        constraint = marketplace_state.allowed_tokens.contains(&token_mint.key())
+    )]
+    pub token_mint: Account<'info, Mint>,
+    #[account(
+        init,
+        payer = creator,
+        space = OpenCampaign::INIT_SPACE,
+        seeds = [b"open_campaign", creator.key().as_ref(), &marketplace_state.campaign_counter.to_le_bytes()],
+        bump,
+    )]
+    pub open_campaign: Account<'info, OpenCampaign>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CompleteOpenCampaign<'info> {
+    #[account(
+        mut,
+        seeds = [b"marketplace"],
+        bump,
+    )]
+    pub marketplace_state: Account<'info, MarketplaceState>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"open_campaign", open_campaign.creator_address.as_ref(), &open_campaign.counter.to_le_bytes()],
+        bump,
+    )]
+    pub open_campaign: Account<'info, OpenCampaign>,
+
+    #[account(
+        mut,
+        constraint = campaign_token_account.owner == open_campaign.key(),
+        constraint = marketplace_state.allowed_tokens.contains(&campaign_token_account.mint)
+    )]
+    pub campaign_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_token_account.owner == marketplace_state.owner,
+        constraint = marketplace_state.allowed_tokens.contains(&owner_token_account.mint)
+    )]
+    pub owner_token_account: Account<'info, TokenAccount>,
+
     pub token_program: Program<'info, anchor_spl::token::Token>,
 }
 
