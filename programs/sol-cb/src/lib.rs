@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_spl::token::{self, Mint, TokenAccount, Transfer};
 
-declare_id!("7fHedDQScjY4dRUhuqNBkx4vgdi5RSv9LdVbonCn53PR");
+declare_id!("9FqxB422dd2UCW7YPDL2GYNWXTisv7envZcmmVMHAU14");
 
 #[derive(AnchorDeserialize, AnchorSerialize, Clone, Copy, Debug, PartialEq)]
 pub enum CampaignStatus {
@@ -123,6 +123,10 @@ pub mod sol_cb {
         TooManyTokens,
         #[msg("Invalid open campaign status")]
         InvalidOpenCampaignStatus,
+        #[msg("Token already allowed")]
+        TokenAlreadyAllowed,
+        #[msg("Token not found")]
+        TokenNotFound,
     }
 
     pub fn initialize(
@@ -497,6 +501,64 @@ pub mod sol_cb {
 
         Ok(())
     }
+
+    pub fn add_allowed_token(
+        ctx: Context<UpdateAllowedTokens>,
+        token_mint: Pubkey,
+        token_decimal: u8,
+    ) -> Result<()> {
+        // Check if the token is already allowed
+        if ctx
+            .accounts
+            .marketplace_state
+            .allowed_tokens
+            .contains(&token_mint)
+        {
+            return err!(CustomErrorCode::TokenAlreadyAllowed);
+        }
+
+        // Check if we're not exceeding the maximum allowed tokens (20 as per space allocation)
+        require!(
+            ctx.accounts.marketplace_state.allowed_tokens.len() < 20,
+            CustomErrorCode::TooManyTokens
+        );
+
+        // Add the new token and its decimal
+        ctx.accounts
+            .marketplace_state
+            .allowed_tokens
+            .push(token_mint);
+        ctx.accounts
+            .marketplace_state
+            .token_decimals
+            .push(token_decimal);
+
+        msg!("Added new allowed token: {}", token_mint);
+        Ok(())
+    }
+
+    pub fn remove_allowed_token(
+        ctx: Context<UpdateAllowedTokens>,
+        token_mint: Pubkey,
+    ) -> Result<()> {
+        let marketplace_state = &mut ctx.accounts.marketplace_state;
+
+        // Find the index of the token to remove
+        if let Some(index) = marketplace_state
+            .allowed_tokens
+            .iter()
+            .position(|x| x == &token_mint)
+        {
+            // Remove the token and its corresponding decimal
+            marketplace_state.allowed_tokens.remove(index);
+            marketplace_state.token_decimals.remove(index);
+
+            msg!("Removed token: {}", token_mint);
+            Ok(())
+        } else {
+            err!(CustomErrorCode::TokenNotFound)
+        }
+    }
 }
 
 #[derive(Accounts)]
@@ -729,6 +791,20 @@ pub struct CompleteOpenCampaign<'info> {
     pub owner_token_account: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, anchor_spl::token::Token>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateAllowedTokens<'info> {
+    #[account(
+        mut,
+        seeds = [b"marketplace"],
+        bump,
+        constraint = marketplace_state.owner == owner.key() @ CustomErrorCode::Unauthorized
+    )]
+    pub marketplace_state: Account<'info, MarketplaceState>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
 }
 
 #[event]
